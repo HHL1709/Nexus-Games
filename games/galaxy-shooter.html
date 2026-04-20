@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Galaxy Shooter - NEXUS GAMES</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; }
+canvas { display:block; max-height:100vh; }
+#overlay { position:fixed; inset:0; background:rgba(0,0,20,0.92); display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:20; }
+#overlay h1 { font-family:'Courier New'; font-size:44px; color:#0ea5e9; text-shadow:0 0 40px #0ea5e9; letter-spacing:4px; margin-bottom:8px; }
+.btn { padding:14px 48px; background:linear-gradient(135deg,#0ea5e9,#06b6d4); border:none; border-radius:6px; color:#fff; font-size:16px; font-weight:bold; letter-spacing:3px; cursor:pointer; margin:8px; transition:0.3s; }
+.btn:hover { transform:scale(1.05); box-shadow:0 0 30px rgba(14,165,233,0.6); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="overlay">
+  <h1>🌌 GALAXY SHOOTER</h1>
+  <p style="color:#94a3b8;margin:8px 0 20px;">Defend the galaxy · Destroy the alien fleet</p>
+  <button class="btn" onclick="startGame()">▶ LAUNCH</button>
+  <p style="color:#475569;font-size:12px;margin-top:16px;">← → / A D to Move · Auto-Fire Enabled · Z for Special</p>
+</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const W = 480, H = 700;
+c.width = W; c.height = H;
+c.style.width = Math.min(W, window.innerWidth) + 'px';
+c.style.height = Math.min(H, window.innerHeight) + 'px';
+
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key]=true; e.preventDefault(); });
+window.addEventListener('keyup', e => keys[e.key]=false);
+
+// Stars
+const stars = Array.from({length:100}, () => ({
+  x: Math.random()*W, y: Math.random()*H,
+  speed: 0.5+Math.random()*2, r: Math.random()*1.5+0.5, b: Math.random()
+}));
+
+let player, bullets, enemies, eBullets, particles, explosions, state;
+let shootTimer = 0, enemyWave = 0, waveTimer = 0, level = 1, score = 0, lives = 3, gameRunning = false;
+
+class Player {
+  constructor() {
+    this.x=W/2; this.y=H-80; this.w=32; this.h=40;
+    this.speed=5; this.invincible=0; this.special=100; this.specialTimer=0;
+  }
+  update() {
+    if (keys['a']||keys['ArrowLeft']) this.x-=this.speed;
+    if (keys['d']||keys['ArrowRight']) this.x+=this.speed;
+    this.x=Math.max(this.w/2,Math.min(W-this.w/2,this.x));
+    if (this.invincible>0) this.invincible--;
+    if (this.special<100) this.special+=0.1;
+    // Auto fire
+    shootTimer++;
+    if (shootTimer>=8) {
+      shootTimer=0;
+      bullets.push({x:this.x,y:this.y-20,vy:-12,r:4,color:'#0ea5e9',power:1});
+    }
+    // Special
+    if (keys['z']&&this.special>=100) {
+      this.special=0;
+      for(let a=0;a<16;a++) {
+        const ang=(a/16)*Math.PI*2;
+        bullets.push({x:this.x,y:this.y,vx:Math.cos(ang)*8,vy:Math.sin(ang)*8,r:5,color:'#06b6d4',power:2,isSpecial:true,life:60});
+      }
+    }
+  }
+  draw() {
+    if (this.invincible>0 && this.invincible%4<2) return;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.shadowColor='#0ea5e9'; ctx.shadowBlur=20;
+    // Engine glow
+    ctx.fillStyle='rgba(14,165,233,0.3)';
+    ctx.beginPath(); ctx.ellipse(0,this.h/2+4,10,6,0,0,Math.PI*2); ctx.fill();
+    // Body
+    ctx.fillStyle='#0ea5e9';
+    ctx.beginPath();
+    ctx.moveTo(0,-this.h/2);
+    ctx.lineTo(this.w/2,this.h/2);
+    ctx.lineTo(-this.w/2,this.h/2);
+    ctx.closePath(); ctx.fill();
+    // Cockpit
+    ctx.fillStyle='#7dd3fc';
+    ctx.beginPath(); ctx.ellipse(0,-4,8,10,0,0,Math.PI*2); ctx.fill();
+    // Wings
+    ctx.fillStyle='#1e40af';
+    ctx.beginPath(); ctx.moveTo(-this.w/2+4,this.h/2); ctx.lineTo(-this.w/2-8,this.h/2+8); ctx.lineTo(-6,this.h/2-4); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(this.w/2-4,this.h/2); ctx.lineTo(this.w/2+8,this.h/2+8); ctx.lineTo(6,this.h/2-4); ctx.fill();
+    ctx.restore();
+    // Special bar
+    ctx.fillStyle='rgba(6,182,212,0.2)'; ctx.fillRect(this.x-25,this.y+26,50,4);
+    ctx.fillStyle='#06b6d4'; ctx.fillRect(this.x-25,this.y+26,(this.special/100)*50,4);
+  }
+}
+
+function spawnWave() {
+  const types=['basic','fast','tank','zigzag'];
+  const type=types[Math.floor(Math.random()*types.length)];
+  const cols=Math.min(3+level,8);
+  for(let i=0;i<cols;i++) {
+    enemies.push({
+      x:40+i*(W-80)/(cols-1||1), y:-40-Math.random()*60,
+      type,
+      hp:type==='tank'?4:1,
+      maxHp:type==='tank'?4:1,
+      speed:type==='fast'?3:1.5,
+      r:type==='tank'?20:14,
+      color:type==='basic'?'#ef4444':type==='fast'?'#f59e0b':type==='tank'?'#8b5cf6':'#10b981',
+      shootTimer:Math.random()*60,
+      dir:1, angle:0, pulse:Math.random()*Math.PI*2
+    });
+  }
+}
+
+function startGame() {
+  document.getElementById('overlay').style.display='none';
+  player=new Player();
+  bullets=[]; enemies=[]; eBullets=[]; particles=[]; explosions=[];
+  score=0; lives=3; level=1; enemyWave=0; waveTimer=0; gameRunning=true;
+  spawnWave();
+  requestAnimationFrame(loop);
+}
+
+function addExplosion(x,y,color,big=false) {
+  const n=big?24:12;
+  for(let i=0;i<n;i++) {
+    const a=Math.random()*Math.PI*2, s=Math.random()*(big?8:5)+2;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,r:Math.random()*(big?6:4)+1,life:big?50:30,color,alpha:1});
+  }
+}
+
+function loop() {
+  if (!gameRunning) return;
+  // BG
+  ctx.fillStyle='#000010'; ctx.fillRect(0,0,W,H);
+  // Stars
+  stars.forEach(s => {
+    s.y+=s.speed; if(s.y>H) s.y=0;
+    const bright=0.3+0.7*Math.abs(Math.sin(Date.now()*0.001+s.b));
+    ctx.fillStyle=`rgba(200,220,255,${bright})`;
+    ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,Math.PI*2); ctx.fill();
+  });
+
+  // Particles
+  for(let i=particles.length-1;i>=0;i--) {
+    const p=particles[i];
+    p.x+=p.vx; p.y+=p.vy; p.vx*=0.95; p.vy*=0.95; p.life--; p.alpha=p.life/40;
+    if(p.life<=0){particles.splice(i,1);continue;}
+    ctx.globalAlpha=Math.max(0,p.alpha);
+    ctx.fillStyle=p.color; ctx.shadowColor=p.color; ctx.shadowBlur=6;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha=1; ctx.shadowBlur=0;
+
+  // Player bullets
+  for(let i=bullets.length-1;i>=0;i--) {
+    const b=bullets[i];
+    b.x+=(b.vx||0); b.y+=b.vy;
+    if(b.life) b.life--;
+    if(b.y<-10||b.y>H+10||b.x<-10||b.x>W+10||(b.life!==undefined&&b.life<=0)){bullets.splice(i,1);continue;}
+    ctx.shadowColor=b.color; ctx.shadowBlur=10;
+    ctx.fillStyle=b.color;
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill();
+  }
+
+  // Enemy bullets
+  for(let i=eBullets.length-1;i>=0;i--) {
+    const b=eBullets[i];
+    b.x+=b.vx; b.y+=b.vy;
+    if(b.y>H+10||b.x<-10||b.x>W+10){eBullets.splice(i,1);continue;}
+    ctx.fillStyle='#ef4444'; ctx.shadowColor='#ef4444'; ctx.shadowBlur=8;
+    ctx.beginPath(); ctx.arc(b.x,b.y,5,0,Math.PI*2); ctx.fill();
+    // Check player hit
+    if(player.invincible<=0) {
+      const dx=b.x-player.x,dy=b.y-player.y;
+      if(Math.sqrt(dx*dx+dy*dy)<18) {
+        eBullets.splice(i,1); lives--;
+        player.invincible=90;
+        addExplosion(player.x,player.y,'#0ea5e9');
+        if(lives<=0){endGame();return;}
+      }
+    }
+  }
+
+  // Enemies
+  for(let i=enemies.length-1;i>=0;i--) {
+    const e=enemies[i];
+    e.pulse+=0.05;
+    e.y+=e.speed+(level*0.1);
+    if(e.type==='zigzag') e.x+=Math.sin(e.y*0.05)*2;
+    if(e.x<e.r||e.x>W-e.r) e.dir*=-1;
+    if(e.type==='basic'||e.type==='tank') { e.x+=e.dir*0.5; }
+    if(e.y>H+50){enemies.splice(i,1);score=Math.max(0,score-50);continue;}
+    // Shoot
+    e.shootTimer++;
+    if(e.shootTimer>90) {
+      e.shootTimer=0;
+      const dx=player.x-e.x,dy=player.y-e.y,d=Math.sqrt(dx*dx+dy*dy);
+      eBullets.push({x:e.x,y:e.y+e.r,vx:(dx/d)*3,vy:(dy/d)*3});
+    }
+    // Draw enemy
+    ctx.save(); ctx.translate(e.x,e.y);
+    ctx.shadowColor=e.color; ctx.shadowBlur=10+Math.sin(e.pulse)*5;
+    ctx.fillStyle=e.color;
+    ctx.beginPath();
+    if(e.type==='tank') {
+      ctx.roundRect(-e.r,-e.r/2,e.r*2,e.r,6); ctx.fill();
+      ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(0,0,e.r*0.35,0,Math.PI*2); ctx.fill();
+    } else {
+      ctx.moveTo(0,e.r); ctx.lineTo(-e.r,-e.r*0.5); ctx.lineTo(0,-e.r*0.3); ctx.lineTo(e.r,-e.r*0.5); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.beginPath(); ctx.arc(0,0,e.r*0.3,0,Math.PI*2); ctx.fill();
+    }
+    // HP bar
+    if(e.hp<e.maxHp) {
+      ctx.fillStyle='#333'; ctx.fillRect(-e.r,-e.r-8,e.r*2,4);
+      ctx.fillStyle=e.color; ctx.fillRect(-e.r,-e.r-8,(e.hp/e.maxHp)*e.r*2,4);
+    }
+    ctx.restore();
+    // Collision with player bullets
+    for(let j=bullets.length-1;j>=0;j--) {
+      const b=bullets[j];
+      const dx=b.x-e.x,dy=b.y-e.y;
+      if(Math.sqrt(dx*dx+dy*dy)<b.r+e.r) {
+        e.hp-=b.power;
+        bullets.splice(j,1);
+        addExplosion(b.x,b.y,e.color);
+        if(e.hp<=0){
+          score+=(e.type==='tank'?100:e.type==='fast'?30:50)*level;
+          addExplosion(e.x,e.y,e.color,true);
+          enemies.splice(i,1);
+          break;
+        }
+      }
+    }
+  }
+
+  player.update(); player.draw();
+
+  // Wave
+  waveTimer++;
+  if(enemies.length===0||waveTimer>200){waveTimer=0;level++;spawnWave();}
+
+  // HUD
+  ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(0,0,W,36);
+  ctx.fillStyle='#0ea5e9'; ctx.font='bold 14px Courier New'; ctx.textAlign='left';
+  ctx.fillText(`SCORE: ${score}`,8,22);
+  ctx.textAlign='center';
+  ctx.fillText(`LEVEL ${level}`,W/2,22);
+  ctx.textAlign='right';
+  ctx.fillStyle='#ef4444';
+  ctx.fillText(`❤️`.repeat(lives),W-8,22);
+  ctx.textAlign='left';
+
+  requestAnimationFrame(loop);
+}
+
+function endGame() {
+  gameRunning=false;
+  const ov=document.getElementById('overlay');
+  ov.innerHTML=`
+    <h1 style="color:#ef4444;text-shadow:0 0 40px #ef4444;">💥 GAME OVER</h1>
+    <p style="color:#94a3b8;font-size:20px;margin:10px 0;">Score: <span style="color:#0ea5e9;font-size:28px;font-weight:bold;">${score}</span></p>
+    <p style="color:#94a3b8;margin-bottom:24px;">Level ${level} Reached</p>
+    <button class="btn" onclick="startGame()">🔄 PLAY AGAIN</button>
+  `;
+  ov.style.display='flex';
+}
+</script>
+</body>
+</html>

@@ -487,7 +487,7 @@ function doLogin() {
   ge('loginPage').style.display = 'none';
   ge('appWrapper').style.display = 'block';
   showToast('success','fa-solid fa-check',`Welcome back, ${found.name}!`);
-  initApp();
+  initApp(true); // restore page from URL hash (e.g. #profile)
 }
 
 function doRegister() {
@@ -872,7 +872,7 @@ function renderGameDetail(el, gid) {
         </div>
         <script>
           (function(){
-            const PKEY='nexusgames_profile_${S.user.id}';
+            const PKEY='nexusgames_profile_' + ${S.user.id};
             let pd={}; try{pd=JSON.parse(localStorage.getItem(PKEY)||'{}');}catch(e){}
             const isFav=(pd.favorites||[]).includes(${g.id});
             const btn=document.getElementById('favBtn-${g.id}');
@@ -882,7 +882,7 @@ function renderGameDetail(el, gid) {
             }
             // Restore status
             try {
-              const prog=JSON.parse(localStorage.getItem('nexusgames_progress_${S.user.id}')||'{}');
+              const prog=JSON.parse(localStorage.getItem('nexusgames_progress_' + ${S.user.id})||'{}');
               const sel=document.getElementById('gameStatusSel-${g.id}');
               if(sel&&prog[${g.id}]) sel.value=prog[${g.id}].status;
             } catch(e){}

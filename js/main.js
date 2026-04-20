@@ -141,14 +141,14 @@ const DB_SEED = JSON.parse(JSON.stringify(DB)); // deep copy before mutation
    ── Aapko yahan apna Firebase config dalna hai ──
    Setup guide: README.md mein dekho
    ═══════════════════════════════════════════════════════ */
-const FIREBASE_CONFIG = {
-  apiKey:            "YOUR_API_KEY",
-  authDomain:        "YOUR_PROJECT.firebaseapp.com",
-  databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-  projectId:         "YOUR_PROJECT",
-  storageBucket:     "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId:             "YOUR_APP_ID"
+const firebaseConfig = {
+  apiKey: "AIzaSyCQI33rfBjAsfynBx3qLMakejmeVgVcjrM",
+  authDomain: "nexus-games-f2148.firebaseapp.com",
+  databaseURL: "https://nexus-games-f2148-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "nexus-games-f2148",
+  storageBucket: "nexus-games-f2148.firebasestorage.app",
+  messagingSenderId: "714456498001",
+  appId: "1:714456498001:web:90b54c48bc785675cc1d70"
 };
 
 // Firebase initialized flag

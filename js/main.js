@@ -133,169 +133,283 @@ const DB = {
 
 const STORE_KEY = 'nexusgames_db_v1';
 
-/* Ye default data hai (50 games jo already hain) — save as SEED */
-const DB_SEED = JSON.parse(JSON.stringify(DB)); // deep copy before mutation
+/* Ye default data hai — save as SEED */
+const DB_SEED = JSON.parse(JSON.stringify(DB));
 
 /* ═══════════════════════════════════════════════════════
-   FIREBASE CONFIG
-   ── Aapko yahan apna Firebase config dalna hai ──
-   Setup guide: README.md mein dekho
+   BACKEND CONFIG
+   ─────────────────────────────────────────────────────
+   Option A — PHP Backend (InfinityFree / Hostinger):
+     PHP_API_URL = 'https://yoursite.com/php/api.php'
+
+   Option B — Firebase (GitHub Pages ke liye):
+     PHP_API_URL = '' (empty) and fill FIREBASE_CONFIG
+
+   Option C — localStorage only (no sync):
+     PHP_API_URL = '' and FIREBASE_CONFIG.apiKey = 'YOUR_API_KEY'
    ═══════════════════════════════════════════════════════ */
-const firebaseConfig = {
-  apiKey: "AIzaSyCQI33rfBjAsfynBx3qLMakejmeVgVcjrM",
-  authDomain: "nexus-games-f2148.firebaseapp.com",
-  databaseURL: "https://nexus-games-f2148-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "nexus-games-f2148",
-  storageBucket: "nexus-games-f2148.firebasestorage.app",
+
+// ── PHP Backend URL ──────────────────────────
+// InfinityFree/Hostinger pe upload karne ke baad yahan URL dalo
+// Example: 'https://nexusgames.infinityfreeapp.com/php/api.php'
+const PHP_API_URL = '';  // ← YAHAN APNA URL DALO
+
+// ── Firebase Config (GitHub Pages ke liye) ──
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyCQI33rfBjAsfynBx3qLMakejmeVgVcjrM",
+  authDomain:        "nexus-games-f2148.firebaseapp.com",
+  databaseURL:       "https://nexus-games-f2148-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId:         "nexus-games-f2148",
+  storageBucket:     "nexus-games-f2148.firebasestorage.app",
   messagingSenderId: "714456498001",
-  appId: "1:714456498001:web:90b54c48bc785675cc1d70"
+  appId:             "1:714456498001:web:90b54c48bc785675cc1d70"
 };
 
-// Firebase initialized flag
-let _fbReady = false;
-let _fbDB    = null;
-let _fbRef   = null;
+// ── Backend mode detection ───────────────────
+const USE_PHP      = PHP_API_URL.length > 0;
+const USE_FIREBASE = !USE_PHP && FIREBASE_CONFIG.apiKey !== 'YOUR_API_KEY';
+const USE_LOCAL    = !USE_PHP && !USE_FIREBASE;
+
+/* ── FIREBASE INIT ── */
+let _fbReady = false, _fbDB = null, _fbRef = null;
+let _pendingSave = false; // Firebase ready hone se pehle save queue
 
 function initFirebase() {
+  if (!USE_FIREBASE) return;
   try {
-    // Check if config is filled in (not placeholder)
-    if (FIREBASE_CONFIG.apiKey === 'YOUR_API_KEY') {
-      console.warn('[NexusGames] Firebase config not set — using localStorage only.');
-      return;
-    }
     if (typeof firebase === 'undefined') {
-      console.warn('[NexusGames] Firebase SDK not loaded — using localStorage.');
+      console.warn('[NexusGames] Firebase SDK not loaded — check internet connection.');
+      showToast('error','fa-solid fa-wifi','Firebase SDK load nahi hua. Internet check karo.');
       return;
     }
-    if (!firebase.apps.length) {
-      firebase.initializeApp(FIREBASE_CONFIG);
-    }
-    _fbDB    = firebase.database();
-    _fbRef   = _fbDB.ref('nexusgames');
-    _fbReady = true;
-    console.log('[NexusGames] Firebase connected ✅');
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    _fbDB = firebase.database();
+    _fbRef = _fbDB.ref('nexusgames');
 
-    // Real-time listener — jab bhi koi change kare, sab browsers update honge
-    _fbRef.on('value', function(snapshot) {
-      const data = snapshot.val();
-      if (!data) return;
-      _applyRemoteData(data);
-      // Re-render current page if app is open
-      if (S.user) {
-        const el = ge('pageContent');
-        if (el && S.page) {
+    // First: try to read once to check connection
+    _fbRef.once('value', function(snapshot) {
+      _fbReady = true;
+      console.log('[NexusGames] Firebase connected ✅');
+      showToast('success','fa-solid fa-database','Firebase connected! Sab devices sync honge.');
+
+      var data = snapshot.val();
+      if (data) {
+        // Remote data exists — use it (it's the "truth")
+        _applyData(data);
+        console.log('[NexusGames] Loaded from Firebase: ' + DB.games.length + ' games');
+        // Re-render current page with fresh data
+        if (S.user && ge('pageContent') && S.page) {
           try {
-            ({
-              home:()=>renderHome(el), allgames:()=>renderAllGames(el),
-              categories:()=>renderCategories(el), gamedetail:()=>renderGameDetail(el,S.gameId),
-              about:()=>renderAbout(el), contact:()=>renderContact(el),
-              profile:()=>renderProfile(el), admin:()=>renderAdmin(el),
-            }[S.page]||(() =>{}))();
-          } catch(e) {}
+            var el = ge('pageContent');
+            ({home:function(){renderHome(el)},allgames:function(){renderAllGames(el)},
+              categories:function(){renderCategories(el)},gamedetail:function(){renderGameDetail(el,S.gameId)},
+              about:function(){renderAbout(el)},contact:function(){renderContact(el)},
+              profile:function(){renderProfile(el)},admin:function(){renderAdmin(el)},
+            }[S.page]||function(){})();
+          } catch(e){}
         }
+      } else {
+        // No remote data yet — push current local data to Firebase
+        console.log('[NexusGames] Firebase empty — pushing local data...');
+        var dbCopy = JSON.parse(JSON.stringify(DB));
+        dbCopy.games.forEach(function(g){ delete g.htmlFileContent; });
+        _fbRef.set(dbCopy).then(function(){
+          console.log('[NexusGames] Local data pushed to Firebase ✅');
+          showToast('info','fa-solid fa-cloud-arrow-up','Data Firebase pe upload ho gaya!');
+        }).catch(function(e){
+          console.warn('[NexusGames] Push failed:', e.message);
+          showToast('error','fa-solid fa-triangle-exclamation','Firebase push failed: ' + e.message);
+        });
+      }
+
+      // Agar koi pending save tha — ab bhejo
+      if (_pendingSave) {
+        _pendingSave = false;
+        dbSave();
+      }
+
+      // Real-time listener — dusre devices pe changes reflect honge
+      _fbRef.on('value', function(snapshot) {
+        var incoming = snapshot.val();
+        if (!incoming) return;
+        _applyData(incoming);
+        if (S.user && ge('pageContent') && S.page) {
+          try {
+            var el = ge('pageContent');
+            ({home:function(){renderHome(el)},allgames:function(){renderAllGames(el)},
+              categories:function(){renderCategories(el)},gamedetail:function(){renderGameDetail(el,S.gameId)},
+              about:function(){renderAbout(el)},contact:function(){renderContact(el)},
+              profile:function(){renderProfile(el)},admin:function(){renderAdmin(el)},
+            }[S.page]||function(){})();
+          } catch(e){ console.warn('[NexusGames] Re-render error:', e); }
+        }
+      });
+
+    }, function(error) {
+      console.warn('[NexusGames] Firebase read failed:', error.message);
+      if (error.code === 'PERMISSION_DENIED') {
+        showToast('error','fa-solid fa-lock','Firebase: Permission denied! Rules mein test mode enable karo.');
+      } else {
+        showToast('error','fa-solid fa-wifi','Firebase connect nahi hua: ' + error.message);
       }
     });
+
   } catch(e) {
-    console.warn('[NexusGames] Firebase init failed:', e.message, '— using localStorage.');
-    _fbReady = false;
+    console.warn('[NexusGames] Firebase init error:', e.message);
+    showToast('error','fa-solid fa-triangle-exclamation','Firebase error: ' + e.message);
   }
 }
 
-function _applyRemoteData(data) {
+function _forcePushNow() {
+  if (!_fbReady || !_fbRef) return;
+  var dbCopy = JSON.parse(JSON.stringify(DB));
+  dbCopy.games.forEach(function(g){ delete g.htmlFileContent; });
+  _fbRef.set(dbCopy).then(function(){
+    showToast('success','fa-solid fa-check','Firebase sync successful!');
+  }).catch(function(e){
+    showToast('error','fa-solid fa-triangle-exclamation','Sync failed: ' + e.message);
+  });
+}
+
+/* ── PHP API call helper ── */
+function phpCall(action, data) {
+  return fetch(PHP_API_URL + '?action=' + action, {
+    method:      'POST',
+    credentials: 'include',
+    headers:     {'Content-Type': 'application/json'},
+    body:        JSON.stringify(data || {}),
+  }).then(function(r){ return r.json(); });
+}
+
+/* ── Apply data from any source ── */
+function _applyData(saved) {
   try {
-    if (data.games       && Array.isArray(data.games))       DB.games       = data.games;
-    if (data.sliderItems && Array.isArray(data.sliderItems)) DB.sliderItems = data.sliderItems;
-    if (data.lockedUsers && Array.isArray(data.lockedUsers)) DB.lockedUsers = data.lockedUsers;
-    if (data.users       && Array.isArray(data.users)) {
-      const defaultIds  = DB_SEED.users.map(u=>u.id);
-      const extraUsers  = data.users.filter(u=>!defaultIds.includes(u.id));
-      DB_SEED.users.forEach(def=>{
-        const updated = data.users.find(u=>u.id===def.id);
+    if (saved.games       && Array.isArray(saved.games))       DB.games       = saved.games;
+    if (saved.sliderItems && Array.isArray(saved.sliderItems)) DB.sliderItems = saved.sliderItems;
+    if (saved.lockedUsers && Array.isArray(saved.lockedUsers)) DB.lockedUsers = saved.lockedUsers;
+    if (saved.users       && Array.isArray(saved.users)) {
+      var defaultIds = DB_SEED.users.map(function(u){return u.id;});
+      var extraUsers = saved.users.filter(function(u){return !defaultIds.includes(u.id);});
+      DB_SEED.users.forEach(function(def){
+        var updated = saved.users.find(function(u){return u.id===def.id;});
         if (updated) Object.assign(def, updated);
       });
-      DB.users = [...DB_SEED.users, ...extraUsers];
+      DB.users = DB_SEED.users.concat(extraUsers);
     }
-    // Re-attach HTML file contents from localStorage
-    DB.games.forEach(g => {
+    DB.games.forEach(function(g) {
       if (!g.htmlFileContent) {
-        const html = localStorage.getItem('nexusgames_html_' + g.id);
+        var html = localStorage.getItem('nexusgames_html_' + g.id);
         if (html) g.htmlFileContent = html;
       }
     });
-  } catch(e) {
-    console.warn('[NexusGames] applyRemoteData error:', e);
-  }
+  } catch(e) { console.warn('[NexusGames] _applyData error:', e); }
 }
 
-// ── SAVE: Firebase first, localStorage as backup ──
+/* ── SAVE ── */
 function dbSave() {
   try {
-    const dbCopy = JSON.parse(JSON.stringify(DB));
-    // Store large HTML files separately in localStorage
-    dbCopy.games.forEach(g => {
+    var dbCopy = JSON.parse(JSON.stringify(DB));
+    dbCopy.games.forEach(function(g) {
       if (g.htmlFileContent) {
         try { localStorage.setItem('nexusgames_html_' + g.id, g.htmlFileContent); } catch(e) {}
         delete g.htmlFileContent;
       }
     });
 
-    // Save to Firebase (syncs to ALL browsers/devices instantly)
-    if (_fbReady && _fbRef) {
-      _fbRef.set(dbCopy).catch(function(e) {
-        console.warn('[NexusGames] Firebase save failed:', e.message);
+    if (USE_PHP) {
+      // Save to PHP/MySQL — syncs to all users
+      phpCall('save_db', {data: dbCopy}).then(function(res){
+        if (res.status !== 'success') {
+          console.warn('[NexusGames] PHP save failed:', res.message);
+          showToast('error','fa-solid fa-triangle-exclamation','Server save failed: ' + res.message);
+        }
+      }).catch(function(e){
+        console.warn('[NexusGames] PHP save error:', e);
+        showToast('error','fa-solid fa-triangle-exclamation','Server unreachable. Changes saved locally.');
       });
+    } else if (USE_FIREBASE) {
+      if (_fbReady && _fbRef) {
+        _fbRef.set(dbCopy).then(function(){
+          console.log('[NexusGames] Saved to Firebase ✅');
+        }).catch(function(e){
+          console.warn('[NexusGames] Firebase save error:', e.message);
+          showToast('error','fa-solid fa-triangle-exclamation','Firebase save failed: ' + e.message);
+        });
+      } else {
+        // Firebase not ready yet — queue the save
+        _pendingSave = true;
+        console.log('[NexusGames] Firebase not ready — save queued');
+      }
     }
 
-    // Always save to localStorage too (works offline)
+    // Always save locally too (offline backup)
     localStorage.setItem(STORE_KEY, JSON.stringify(dbCopy));
 
   } catch(e) {
-    console.warn('[NexusGames] dbSave error:', e.message);
-    showToast('error','fa-solid fa-triangle-exclamation','Save failed! Check connection.');
+    console.warn('[NexusGames] dbSave error:', e);
+    showToast('error','fa-solid fa-triangle-exclamation','Save failed!');
   }
 }
 
-// ── LOAD: Firebase listener handles live updates, localStorage for first load ──
+/* ── LOAD ── */
 function dbLoad() {
-  try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) return;
-    const saved = JSON.parse(raw);
-    _applyRemoteData(saved);
-    console.log('[NexusGames] Loaded from localStorage: ' + DB.games.length + ' games, ' + DB.users.length + ' users');
-  } catch(e) {
-    console.warn('[NexusGames] dbLoad error:', e.message);
+  if (USE_PHP) {
+    // Load from PHP/MySQL
+    phpCall('get_db').then(function(res) {
+      if (res.status === 'success' && res.data) {
+        _applyData(res.data);
+        console.log('[NexusGames] Loaded from PHP/MySQL: ' + DB.games.length + ' games');
+        // Re-init app if already running
+        if (S.user) {
+          renderHeader(); renderSidebar();
+          var el = ge('pageContent');
+          if (el && S.page) {
+            ({home:function(){renderHome(el)},allgames:function(){renderAllGames(el)},
+              categories:function(){renderCategories(el)},gamedetail:function(){renderGameDetail(el,S.gameId)},
+              about:function(){renderAbout(el)},contact:function(){renderContact(el)},
+              profile:function(){renderProfile(el)},admin:function(){renderAdmin(el)},
+            }[S.page]||function(){})();
+          }
+        }
+      }
+    }).catch(function(e){
+      console.warn('[NexusGames] PHP load failed, using localStorage:', e);
+      _loadFromLocal();
+    });
+  } else {
+    _loadFromLocal();
   }
 }
 
+function _loadFromLocal() {
+  try {
+    var raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return;
+    _applyData(JSON.parse(raw));
+    console.log('[NexusGames] Loaded from localStorage: ' + DB.games.length + ' games');
+  } catch(e) { console.warn('[NexusGames] localStorage load error:', e); }
+}
+
+/* ── CLEAR ── */
 function dbClear() {
-  const keysToRemove = [];
-  for (let i=0; i<localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith('nexusgames')) keysToRemove.push(k);
+  var keys = [];
+  for (var i=0; i<localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (k && k.startsWith('nexusgames')) keys.push(k);
   }
-  keysToRemove.forEach(k => localStorage.removeItem(k));
-  DB.games        = JSON.parse(JSON.stringify(DB_SEED.games));
-  DB.sliderItems  = JSON.parse(JSON.stringify(DB_SEED.sliderItems));
-  DB.users        = JSON.parse(JSON.stringify(DB_SEED.users));
-  DB.lockedUsers  = [];
-  // Clear Firebase too
-  if (_fbReady && _fbRef) {
-    _fbRef.set({
-      games:       DB.games,
-      sliderItems: DB.sliderItems,
-      users:       DB.users,
-      lockedUsers: [],
-    }).catch(function(e){ console.warn('Firebase clear failed:', e); });
-  }
+  keys.forEach(function(k){ localStorage.removeItem(k); });
+  DB.games       = JSON.parse(JSON.stringify(DB_SEED.games));
+  DB.sliderItems = JSON.parse(JSON.stringify(DB_SEED.sliderItems));
+  DB.users       = JSON.parse(JSON.stringify(DB_SEED.users));
+  DB.lockedUsers = [];
   dbSave();
   showToast('success','fa-solid fa-rotate','Database reset to default!');
 }
 
-// Load from localStorage immediately, then Firebase listener takes over
-dbLoad();
-// Initialize Firebase (if config is set)
-initFirebase();
+// ── STARTUP ──────────────────────────────────
+_loadFromLocal();   // Instant load from cache
+initFirebase();     // Firebase if configured
+// PHP load happens after DOMContentLoaded (see below)
 
 /* ─── APP STATE ─────────────────────────────── */
 const S = {user:null, page:'home', gameId:null, slideIdx:0, slideTimer:null};
@@ -1348,6 +1462,10 @@ function renderAdmin(el) {
           <button class="btn-xs" style="background:rgba(245,158,11,.08);color:var(--gold);border-color:rgba(245,158,11,.22)" onclick="confirmReset()">
             <i class="fa-solid fa-rotate"></i> Reset DB
           </button>
+          ${USE_FIREBASE ? `
+          <button class="btn-xs btn-add" onclick="_forcePushNow()" title="Force push all data to Firebase now">
+            <i class="fa-solid fa-cloud-arrow-up"></i> Force Sync
+          </button>` : ''}
         </div>
       </div>
     </div>
@@ -2074,6 +2192,11 @@ function showToast(type, iconName, msg) {
 
 /* ─── DOMContentLoaded ──────────────────────── */
 document.addEventListener('DOMContentLoaded',()=>{
+
+  // ── 0. PHP: load latest data from server (async, updates after page renders) ──
+  if (USE_PHP) {
+    setTimeout(function(){ dbLoad(); }, 200); // slight delay so page renders first
+  }
 
   // ── 1. AUTO-RESTORE SESSION (must run first, before anything else) ──
   try {

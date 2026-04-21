@@ -302,48 +302,95 @@ function _applyData(saved) {
         if (html) g.htmlFileContent = html;
       }
     });
+    // Restore About page data from Firebase
+    if (saved.about && typeof saved.about === 'object') {
+      try { localStorage.setItem(ABOUT_KEY, JSON.stringify(saved.about)); } catch(e){}
+    }
+
+    // Restore per-user profile data (favorites, joinDate, etc.)
+    if (saved.profiles && typeof saved.profiles === 'object') {
+      Object.keys(saved.profiles).forEach(function(uid) {
+        try { localStorage.setItem('nexusgames_profile_' + uid, JSON.stringify(saved.profiles[uid])); } catch(e){}
+      });
+    }
+
+    // Restore per-user game progress
+    if (saved.progress && typeof saved.progress === 'object') {
+      Object.keys(saved.progress).forEach(function(uid) {
+        try { localStorage.setItem('nexusgames_progress_' + uid, JSON.stringify(saved.progress[uid])); } catch(e){}
+      });
+    }
+
+    // CRITICAL: After DB.users replaced, update S.user reference to new object
+    if (S.user && DB.users) {
+      var refreshed = DB.users.find(function(u){ return u.id === S.user.id; });
+      if (refreshed) S.user = refreshed;
+    }
   } catch(e) { console.warn('[NexusGames] _applyData error:', e); }
 }
 
 /* ── SAVE ── */
+function _buildFullSnapshot() {
+  // Build complete snapshot — DB + profiles + progress + about
+  var dbCopy = JSON.parse(JSON.stringify(DB));
+  dbCopy.games.forEach(function(g) {
+    if (g.htmlFileContent) {
+      try { localStorage.setItem('nexusgames_html_' + g.id, g.htmlFileContent); } catch(e) {}
+      delete g.htmlFileContent;
+    }
+  });
+
+  // Collect all user profiles
+  dbCopy.profiles = {};
+  DB.users.forEach(function(u) {
+    try {
+      var pdata = localStorage.getItem('nexusgames_profile_' + u.id);
+      if (pdata) dbCopy.profiles[u.id] = JSON.parse(pdata);
+    } catch(e) {}
+  });
+
+  // Collect all game progress
+  dbCopy.progress = {};
+  DB.users.forEach(function(u) {
+    try {
+      var prog = localStorage.getItem('nexusgames_progress_' + u.id);
+      if (prog) dbCopy.progress[u.id] = JSON.parse(prog);
+    } catch(e) {}
+  });
+
+  // Collect about page info
+  try {
+    var about = localStorage.getItem('nexusgames_about_v1');
+    if (about) dbCopy.about = JSON.parse(about);
+  } catch(e) {}
+
+  return dbCopy;
+}
+
 function dbSave() {
   try {
-    var dbCopy = JSON.parse(JSON.stringify(DB));
-    dbCopy.games.forEach(function(g) {
-      if (g.htmlFileContent) {
-        try { localStorage.setItem('nexusgames_html_' + g.id, g.htmlFileContent); } catch(e) {}
-        delete g.htmlFileContent;
-      }
-    });
+    var snapshot = _buildFullSnapshot();
 
     if (USE_PHP) {
-      // Save to PHP/MySQL — syncs to all users
-      phpCall('save_db', {data: dbCopy}).then(function(res){
-        if (res.status !== 'success') {
-          console.warn('[NexusGames] PHP save failed:', res.message);
-          showToast('error','fa-solid fa-triangle-exclamation','Server save failed: ' + res.message);
-        }
-      }).catch(function(e){
-        console.warn('[NexusGames] PHP save error:', e);
-        showToast('error','fa-solid fa-triangle-exclamation','Server unreachable. Changes saved locally.');
-      });
+      phpCall('save_db', {data: snapshot}).then(function(res){
+        if (res.status !== 'success') console.warn('[NexusGames] PHP save failed:', res.message);
+      }).catch(function(e){ console.warn('[NexusGames] PHP save error:', e); });
     } else if (USE_FIREBASE) {
       if (_fbReady && _fbRef) {
-        _fbRef.set(dbCopy).then(function(){
+        _fbRef.set(snapshot).then(function(){
           console.log('[NexusGames] Saved to Firebase ✅');
         }).catch(function(e){
           console.warn('[NexusGames] Firebase save error:', e.message);
           showToast('error','fa-solid fa-triangle-exclamation','Firebase save failed: ' + e.message);
         });
       } else {
-        // Firebase not ready yet — queue the save
         _pendingSave = true;
         console.log('[NexusGames] Firebase not ready — save queued');
       }
     }
 
     // Always save locally too (offline backup)
-    localStorage.setItem(STORE_KEY, JSON.stringify(dbCopy));
+    localStorage.setItem(STORE_KEY, JSON.stringify(snapshot));
 
   } catch(e) {
     console.warn('[NexusGames] dbSave error:', e);
@@ -487,7 +534,7 @@ function doLogin() {
   ge('loginPage').style.display = 'none';
   ge('appWrapper').style.display = 'block';
   showToast('success','fa-solid fa-check',`Welcome back, ${found.name}!`);
-  initApp(true); // restore page from URL hash (e.g. #profile)
+  initApp();
 }
 
 function doRegister() {
@@ -872,7 +919,7 @@ function renderGameDetail(el, gid) {
         </div>
         <script>
           (function(){
-            const PKEY='nexusgames_profile_' + ${S.user.id};
+            const PKEY='nexusgames_profile_${S.user.id}';
             let pd={}; try{pd=JSON.parse(localStorage.getItem(PKEY)||'{}');}catch(e){}
             const isFav=(pd.favorites||[]).includes(${g.id});
             const btn=document.getElementById('favBtn-${g.id}');
@@ -882,7 +929,7 @@ function renderGameDetail(el, gid) {
             }
             // Restore status
             try {
-              const prog=JSON.parse(localStorage.getItem('nexusgames_progress_' + ${S.user.id})||'{}');
+              const prog=JSON.parse(localStorage.getItem('nexusgames_progress_${S.user.id}')||'{}');
               const sel=document.getElementById('gameStatusSel-${g.id}');
               if(sel&&prog[${g.id}]) sel.value=prog[${g.id}].status;
             } catch(e){}
@@ -971,7 +1018,10 @@ function postComment(gid) {
 // About page persistent data (name, bio, photo)
 const ABOUT_KEY = 'nexusgames_about_v1';
 function aboutLoad() { try { const r=localStorage.getItem(ABOUT_KEY); return r?JSON.parse(r):{};} catch(e){return{};} }
-function aboutSave(d) { try { localStorage.setItem(ABOUT_KEY,JSON.stringify(d)); } catch(e){} }
+function aboutSave(d) {
+  try { localStorage.setItem(ABOUT_KEY, JSON.stringify(d)); } catch(e){}
+  dbSave(); // sync everything to Firebase
+}
 
 function renderAbout(el) {
   const info = aboutLoad();
@@ -1118,6 +1168,7 @@ function renderProfile(el) {
   const joinDate = pdata.joinDate || (()=>{
     pdata.joinDate = new Date().toLocaleDateString('en',{month:'short',year:'numeric'});
     try{localStorage.setItem(PKEY,JSON.stringify(pdata));}catch(e){}
+    dbSave();
     return pdata.joinDate;
   })();
 
@@ -1354,8 +1405,9 @@ function addFavorite(gid) {
   if (pd.favorites.length >= 6) { showToast('error','fa-solid fa-triangle-exclamation','Max 6 favourites allowed.'); return; }
   if (!pd.favorites.includes(gid)) { pd.favorites.push(gid); }
   try { localStorage.setItem(PKEY, JSON.stringify(pd)); } catch(e){}
+  dbSave();
   showToast('success','fa-solid fa-heart','Added to favourites!');
-  navigateTo('profile'); // refresh page
+  navigateTo('profile');
 }
 
 function removeFavorite(gid) {
@@ -1363,6 +1415,7 @@ function removeFavorite(gid) {
   let pd = {}; try { pd=JSON.parse(localStorage.getItem(PKEY)||'{}'); } catch(e){}
   pd.favorites = (pd.favorites||[]).filter(id=>id!==gid);
   try { localStorage.setItem(PKEY, JSON.stringify(pd)); } catch(e){}
+  dbSave();
   showToast('info','fa-solid fa-heart','Removed from favourites.');
   navigateTo('profile');
 }
@@ -1384,6 +1437,7 @@ function toggleFavoriteFromDetail(gid, btn) {
     showToast('success','fa-solid fa-heart','Added to favourites!');
   }
   try { localStorage.setItem(PKEY, JSON.stringify(pd)); } catch(e){}
+  dbSave();
 }
 
 function resetFavBtnStyle(gid, btn) {
@@ -1744,6 +1798,7 @@ function setProgress(uid, gid, status) {
   const p = getProgress(uid);
   p[gid] = { status, updatedAt: new Date().toLocaleDateString('en',{day:'numeric',month:'short'}) };
   try { localStorage.setItem('nexusgames_progress_' + uid, JSON.stringify(p)); } catch(e) {}
+  dbSave(); // sync to Firebase
 }
 
 function updateGameStatus(gid, status) {

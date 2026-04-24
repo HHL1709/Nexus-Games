@@ -855,7 +855,7 @@ function renderGameDetail(el, gid) {
   const g=DB.games.find(x=>x.id===parseInt(gid));
   if (!g) { el.innerHTML=`<div class="alert alert-info">${duoIcon('info','sm')} Game not found.</div>`; return; }
   const c=ci(g.cat);
-  const stars=n=>[1,2,3,4,5].map(i=>`${duoIcon('gamepad','sm')}`).join('');
+  const stars=n=>[1,2,3,4,5].map(i=>`<i class="fa-${i<=Math.round(n)?'solid':'regular'} fa-star" style="font-size:13px;color:#f59e0b"></i>`).join('');
 
   const screenshotsHTML = g.screenshots && g.screenshots.length
     ? g.screenshots.map(s=>`
@@ -932,14 +932,14 @@ function renderGameDetail(el, gid) {
             {i:'code-branch',l:'Version',  v:g.ver},
             {i:'shield',    l:'Age Rating',v:g.age},
             {i:'calendar',  l:'Released',  v:g.date},
-            {i:'play',      l:'Plays',     v:(g.plays/1000).toFixed(0)+'K'},
+            {i:'play',      l:'Plays',     v:((g.plays||0)/1000).toFixed(0)+'K'},
           ].map(r=>`<div class="meta-row"><span class="meta-label">${duoIcon(r.i,'xs')}${r.l}</span><span class="meta-value">${r.v}</span></div>`).join('')}
         </div>
       </div>
       <div class="game-detail-main">
         <div class="game-tags">
           <span class="tag">${duoIcon('tag','xs')} ${g.cat}</span>
-          ${g.tags.map(t=>`<span class="tag">${t}</span>`).join('')}
+          ${(g.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('')}
         </div>
         <h1>${g.title}</h1>
         <div class="rating-row">
@@ -959,7 +959,7 @@ function renderGameDetail(el, gid) {
           <textarea id="cTxt" placeholder="Share your experience..."></textarea>
           <button class="btn-comment" onclick="postComment(${g.id})">${duoIcon('paper-plane','sm')} Post</button>
         </div>`:`<div class="alert alert-info">${duoIcon('info','sm')} Sign in to post a review.</div>`}
-        <div id="cList-${g.id}">${g.comments.length?g.comments.map(cmtHTML).join(''):`<p style="color:var(--text-3);font-size:12px;padding:10px 0">No reviews yet. Be the first!</p>`}</div>
+        <div id="cList-${g.id}">${(g.comments||[]).length?(g.comments||[]).map(cmtHTML).join(''):`<p style="color:var(--text-3);font-size:12px;padding:10px 0">No reviews yet. Be the first!</p>`}</div>
       </div>
     </div>`;
   // Init fav/status buttons after DOM ready (can't use <script> in innerHTML)
@@ -1018,10 +1018,11 @@ function cmtHTML(c) {
 function postComment(gid) {
   const txt=v('cTxt'); if(!txt) return;
   const g=DB.games.find(x=>x.id===gid); if(!g) return;
+  if(!g.comments)g.comments=[];
   g.comments.unshift({user:S.user.name,rating:5,text:txt,date:'Just now',av:S.user.name.charAt(0),avatar:S.user.avatar});
   dbSave();
   ge('cTxt').value='';
-  ge(`cList-${gid}`).innerHTML=g.comments.map(cmtHTML).join('');
+  ge(`cList-${gid}`).innerHTML=(g.comments||[]).map(cmtHTML).join('');
   showToast('success','check','Review posted!');
 }
 
@@ -1174,7 +1175,7 @@ function renderProfile(el) {
   try { pdata = JSON.parse(localStorage.getItem(PKEY)||'{}'); } catch(e){}
 
   // Stats — count from DB
-  const totalComments = DB.games.reduce((s,g)=>s+g.comments.filter(c=>c.user===u.name).length,0);
+  const totalComments = DB.games.reduce((s,g)=>s+(g.comments||[]).filter(c=>c&&c.user===u.name).length,0);
   const favoriteGames = (pdata.favorites||[]).map(id=>DB.games.find(g=>g.id===id)).filter(Boolean);
   const joinDate = pdata.joinDate || (()=>{
     pdata.joinDate = new Date().toLocaleDateString('en',{month:'short',year:'numeric'});

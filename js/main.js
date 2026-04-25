@@ -211,13 +211,21 @@ function initFirebase() {
             }[S.page]||function(){})();
           } catch(e){}
         } else if (!S.user) {
-          // Firebase loaded — try session restore again (user may be in Firebase but not local DB)
+          // Firebase loaded — try session restore (covers pending restore + new device login)
           try {
             if (sessionLoad()) {
               var lp = ge('loginPage'), aw = ge('appWrapper');
-              if (lp) lp.style.display = 'none';
+              if (lp) { lp.style.display = 'none'; }
               if (aw) aw.style.display = 'block';
+              // Re-inject login icons for future logout
+              try { injectLoginIcons(); } catch(e2) {}
+              window._pendingSessionRestore = false;
               initApp(true);
+            } else if (window._pendingSessionRestore) {
+              // Had session but user not found even after Firebase — session expired
+              window._pendingSessionRestore = false;
+              localStorage.removeItem(SESSION_KEY);
+              window.location.reload(); // reload to show clean login page
             }
           } catch(e) {}
         }
@@ -351,10 +359,13 @@ function _buildFullSnapshot() {
   var dbCopy = JSON.parse(JSON.stringify(DB));
   dbCopy.games.forEach(function(g) {
     if (g.htmlFileContent) {
-      // Save locally for fast access
+      // Save locally for fast access and offline play
       try { localStorage.setItem('nexusgames_html_' + g.id, g.htmlFileContent); } catch(e) {}
-      // Keep in Firebase snapshot too — so other devices (phone, laptop) can play
-      // HTML files are plain text, Firebase 1GB free is more than enough
+      // REMOVE from Firebase snapshot — HTML files are too large (causes "Save failed")
+      // Each device loads from localStorage; admin device has it after first upload
+      delete g.htmlFileContent;
+      // Store filename so other devices know a file exists
+      // g.htmlFileName is already preserved
     }
   });
 
@@ -641,15 +652,17 @@ function initApp(restorePage) {
 
 /* ─── NAVIGATION ────────────────────────────── */
 function navigateTo(page, param) {
-  S.page=page; S.gameId=param||null;
-  pageSave(page, param); // ← save current page to localStorage + URL hash
+  // Ensure game IDs are always integers
+  const paramFinal = (page === 'gamedetail' && param) ? (parseInt(param)||param) : (param||null);
+  S.page=page; S.gameId=paramFinal;
+  pageSave(page, paramFinal);
   if (S.slideTimer) { clearInterval(S.slideTimer); S.slideTimer=null; }
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page===page));
   closeSidebar();
   const el=ge('pageContent'); el.innerHTML='';
   ({
     home:()=>renderHome(el), allgames:()=>renderAllGames(el),
-    categories:()=>renderCategories(el), gamedetail:()=>renderGameDetail(el,param),
+    categories:()=>renderCategories(el), gamedetail:()=>renderGameDetail(el,paramFinal),
     about:()=>renderAbout(el), contact:()=>renderContact(el),
     profile:()=>renderProfile(el), admin:()=>renderAdmin(el),
   }[page]||(() =>renderHome(el)))();
@@ -887,8 +900,24 @@ function renderCategories(el) {
 
 /* ─── GAME DETAIL ───────────────────────────── */
 function renderGameDetail(el, gid) {
-  const g=DB.games.find(x=>x.id===parseInt(gid));
-  if (!g) { el.innerHTML=`<div class="alert alert-info">${duoIcon('info','sm')} Game not found.</div>`; return; }
+  // Handle both string and number IDs robustly
+  const gidNum = parseInt(gid);
+  const g = DB.games.find(x => x.id === gidNum || x.id == gid);
+  if (!g) {
+    // Firebase may not have loaded yet — wait and retry once
+    if (USE_FIREBASE && !_fbReady) {
+      el.innerHTML = `<div style="text-align:center;padding:40px;color:var(--t3)">
+        <i class="fa-solid fa-circle-notch fa-spin" style="font-size:32px;color:#0ea5e9;margin-bottom:12px;display:block"></i>
+        <p>Loading game data...</p></div>`;
+      var retryTimer = setTimeout(function(){
+        var g2 = DB.games.find(x => x.id === gidNum || x.id == gid);
+        if (g2) { el.innerHTML=''; renderGameDetail(el, gid); }
+        else { el.innerHTML=`<div class="alert alert-info">${duoIcon('info','sm')} Game not found.</div>`; }
+      }, 3000);
+      return;
+    }
+    el.innerHTML=`<div class="alert alert-info">${duoIcon('info','sm')} Game not found.</div>`; return;
+  }
   const c=ci(g.cat);
   const stars=n=>[1,2,3,4,5].map(i=>`<i class="fa-${i<=Math.round(n)?'solid':'regular'} fa-star" style="font-size:13px;color:#f59e0b"></i>`).join('');
 
@@ -2300,19 +2329,45 @@ document.addEventListener('DOMContentLoaded',()=>{
     setTimeout(function(){ dbLoad(); }, 200); // slight delay so page renders first
   }
 
-  // ── 1. AUTO-RESTORE SESSION (must run first, before anything else) ──
+  // ── 1. AUTO-RESTORE SESSION ──
+  // Strategy: Try local first. If session key exists but user not found locally,
+  // show a loading screen and wait for Firebase to load, then retry.
   try {
-    if (sessionLoad()) {
-      // Valid session found — hide login, show app immediately (no flash)
-      const lp = ge('loginPage');
-      const aw = ge('appWrapper');
-      if (lp) lp.style.display = 'none';
-      if (aw) aw.style.display = 'block';
-      initApp(true); // restore last visited page
+    const sessRaw = localStorage.getItem(SESSION_KEY);
+    if (sessRaw) {
+      // Session key exists — try local first
+      if (sessionLoad()) {
+        // Found in local DB — show app immediately
+        const lp = ge('loginPage');
+        const aw = ge('appWrapper');
+        if (lp) lp.style.display = 'none';
+        if (aw) aw.style.display = 'block';
+        initApp(true);
+      } else {
+        // Session key exists but user not in local DB yet
+        // (Firebase hasn't loaded) — show loading overlay
+        const lp = ge('loginPage');
+        if (lp) {
+          lp.innerHTML = `
+            <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
+              min-height:100vh;background:#010912;gap:16px;">
+              <i class="fa-solid fa-gamepad" style="font-size:48px;color:#0ea5e9"></i>
+              <div style="font-family:'Orbitron',sans-serif;font-size:20px;font-weight:800;
+                color:#fff;letter-spacing:2px">NEXUS GAMES</div>
+              <div style="display:flex;align-items:center;gap:8px;color:#94a3b8;font-size:13px">
+                <i class="fa-solid fa-circle-notch fa-spin" style="color:#0ea5e9"></i>
+                Connecting to server...
+              </div>
+            </div>`;
+          lp.style.display = 'flex';
+        }
+        // Firebase will call _onFirebaseReady which retries session
+        window._pendingSessionRestore = true;
+      }
     }
+    // else: no session — stay on login page normally
   } catch(e) {
     console.warn('Session restore failed:', e);
-    // Stay on login page
   }
 
   // ── 2. Login page setup (only needed if not auto-logged-in) ──

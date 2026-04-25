@@ -192,6 +192,8 @@ function initFirebase() {
       _fbReady = true;
       console.log('[NexusGames] Firebase connected ✅');
       showToast('success','fa-solid fa-database','Firebase connected! Sab devices sync honge.');
+      // Update login page status if visible
+      try { if (window._onFirebaseReady) window._onFirebaseReady(); } catch(e) {}
 
       var data = snapshot.val();
       if (data) {
@@ -208,6 +210,16 @@ function initFirebase() {
               profile:function(){renderProfile(el)},admin:function(){renderAdmin(el)},
             }[S.page]||function(){})();
           } catch(e){}
+        } else if (!S.user) {
+          // Firebase loaded — try session restore again (user may be in Firebase but not local DB)
+          try {
+            if (sessionLoad()) {
+              var lp = ge('loginPage'), aw = ge('appWrapper');
+              if (lp) lp.style.display = 'none';
+              if (aw) aw.style.display = 'block';
+              initApp(true);
+            }
+          } catch(e) {}
         }
       } else {
         // No remote data yet — push current local data to Firebase
@@ -291,14 +303,14 @@ function _applyData(saved) {
     if (saved.games       && Array.isArray(saved.games))       DB.games       = saved.games;
     if (saved.sliderItems && Array.isArray(saved.sliderItems)) DB.sliderItems = saved.sliderItems;
     if (saved.lockedUsers && Array.isArray(saved.lockedUsers)) DB.lockedUsers = saved.lockedUsers;
-    if (saved.users       && Array.isArray(saved.users)) {
-      var defaultIds = DB_SEED.users.map(function(u){return u.id;});
-      var extraUsers = saved.users.filter(function(u){return !defaultIds.includes(u.id);});
+    if (saved.users       && Array.isArray(saved.users) && saved.users.length > 0) {
+      // Firebase is truth — use ALL users from Firebase (includes newly registered players)
+      DB.users = saved.users.map(function(u){ return Object.assign({}, u); });
+      // Also update DB_SEED so local fallback stays in sync
       DB_SEED.users.forEach(function(def){
         var updated = saved.users.find(function(u){return u.id===def.id;});
         if (updated) Object.assign(def, updated);
       });
-      DB.users = DB_SEED.users.concat(extraUsers);
     }
     DB.games.forEach(function(g) {
       if (!g.htmlFileContent) {
@@ -339,8 +351,10 @@ function _buildFullSnapshot() {
   var dbCopy = JSON.parse(JSON.stringify(DB));
   dbCopy.games.forEach(function(g) {
     if (g.htmlFileContent) {
+      // Save locally for fast access
       try { localStorage.setItem('nexusgames_html_' + g.id, g.htmlFileContent); } catch(e) {}
-      delete g.htmlFileContent;
+      // Keep in Firebase snapshot too — so other devices (phone, laptop) can play
+      // HTML files are plain text, Firebase 1GB free is more than enough
     }
   });
 
@@ -502,9 +516,15 @@ function sessionClear() {
 function pageSave(page, param) {
   try {
     localStorage.setItem(PAGE_KEY, JSON.stringify({page, param: param||null}));
-    // Also update URL hash so browser back/forward works
+    // Use pushState so browser back/forward button works properly
     const hash = param ? `#${page}/${param}` : `#${page}`;
-    history.replaceState(null, '', hash);
+    // Only pushState if navigating to a different page (not same page refresh)
+    const currentHash = window.location.hash;
+    if (currentHash !== hash) {
+      history.pushState({page, param: param||null}, '', hash);
+    } else {
+      history.replaceState({page, param: param||null}, '', hash);
+    }
   } catch(e) {}
 }
 
@@ -529,7 +549,15 @@ function doLogin() {
   hide('login-error');
   if (!u||!p) { showAuthErr('login-error','login-err-msg','Please fill in all fields.'); return; }
   const found = DB.users.find(x => x.username===u && x.password===p && x.role===role);
-  if (!found) { showAuthErr('login-error','login-err-msg','Invalid credentials. Check username and password.'); return; }
+  if (!found) {
+    // If Firebase is connected but not yet fully loaded, give hint
+    if (USE_FIREBASE && !_fbReady) {
+      showAuthErr('login-error','login-err-msg','Connecting to server... please wait a moment and try again.');
+    } else {
+      showAuthErr('login-error','login-err-msg','Invalid credentials. Check username and password.');
+    }
+    return;
+  }
   // Check if account is locked
   if (DB.lockedUsers && DB.lockedUsers.includes(found.id)) {
     showAuthErr('login-error','login-err-msg','This account has been locked by admin. Please contact support.');
@@ -579,8 +607,10 @@ function showAuthErr(eid,mid,msg) {
 
 function logout() {
   S.user = null;
+  S.page = 'home';
+  S.gameId = null;
   sessionClear();
-  history.replaceState(null, '', window.location.pathname); // remove hash
+  history.replaceState(null, '', window.location.pathname);
   ge('appWrapper').style.display = 'none';
   ge('loginPage').style.display  = 'flex';
   showToast('info','fa-solid fa-right-from-bracket','Signed out successfully.');
@@ -598,8 +628,13 @@ function initApp(restorePage) {
   renderSidebar();
   if (restorePage) {
     const saved = pageLoad();
-    navigateTo(saved.page || 'home', saved.param ? parseInt(saved.param)||saved.param : null);
+    const pg    = saved.page || 'home';
+    const pm    = saved.param ? (parseInt(saved.param)||saved.param) : null;
+    // Set initial history entry so back button works from first page
+    history.replaceState({page: pg, param: pm||null}, '', pm ? `#${pg}/${pm}` : `#${pg}`);
+    navigateTo(pg, pm);
   } else {
+    history.replaceState({page:'home', param:null}, '', '#home');
     navigateTo('home');
   }
 }
@@ -2283,6 +2318,24 @@ document.addEventListener('DOMContentLoaded',()=>{
   // ── 2. Login page setup (only needed if not auto-logged-in) ──
   try { injectLoginIcons(); } catch(e) {}
 
+  // Firebase status indicator on login page
+  if (USE_FIREBASE) {
+    const loginCard = document.querySelector('.login-card');
+    if (loginCard) {
+      const fbStatus = document.createElement('div');
+      fbStatus.id = 'fbLoginStatus';
+      fbStatus.style.cssText = 'text-align:center;font-size:11px;color:#94a3b8;padding:6px 0 2px;letter-spacing:0.3px;display:flex;align-items:center;justify-content:center;gap:5px;';
+      fbStatus.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin" style="font-size:10px;color:#0ea5e9"></i> Connecting to server...';
+      loginCard.appendChild(fbStatus);
+      // Update when Firebase connects
+      const _origInitFb = window._fbReadyCallback;
+      window._onFirebaseReady = function() {
+        const el = document.getElementById('fbLoginStatus');
+        if (el) { el.innerHTML = '<i class="fa-solid fa-circle" style="font-size:8px;color:#34d399"></i> Server connected — all accounts synced'; }
+      };
+    }
+  }
+
   // Particles
   try {
     const pc=ge('loginParticles');
@@ -2306,12 +2359,18 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
   });
 
-  // Enter key on login
+  // Enter key on login, register, forgot
   ['l-user','l-pass'].forEach(id=>{
     ge(id)?.addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); });
   });
+  ['r-name','r-user','r-pass','r-pass2'].forEach(id=>{
+    ge(id)?.addEventListener('keydown',e=>{ if(e.key==='Enter') doRegister(); });
+  });
+  ['f-user','f-pass','f-pass2'].forEach(id=>{
+    ge(id)?.addEventListener('keydown',e=>{ if(e.key==='Enter') doForgot(); });
+  });
 
-  // Browser back/forward button support
+  // Browser back/forward button support (hashchange for hash nav)
   window.addEventListener('hashchange', () => {
     if (!S.user) return;
     const hash = window.location.hash.replace('#','');
@@ -2331,5 +2390,34 @@ document.addEventListener('DOMContentLoaded',()=>{
         profile:()=>renderProfile(el), admin:()=>renderAdmin(el),
       }[page]||(() =>renderHome(el)))();
     }
+  });
+
+  // popstate: handles browser back/forward with pushState history
+  window.addEventListener('popstate', (event) => {
+    if (!S.user) return;
+    // Get state from history or fall back to hash
+    let page = 'home', param = null;
+    if (event.state && event.state.page) {
+      page  = event.state.page;
+      param = event.state.param || null;
+    } else {
+      const hash = window.location.hash.replace('#','');
+      if (hash) {
+        const parts = hash.split('/');
+        page  = parts[0] || 'home';
+        param = parts[1] ? (parseInt(parts[1])||parts[1]) : null;
+      }
+    }
+    S.page = page; S.gameId = param;
+    localStorage.setItem(PAGE_KEY, JSON.stringify({page, param: param||null}));
+    if (S.slideTimer) { clearInterval(S.slideTimer); S.slideTimer=null; }
+    document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
+    const el=ge('pageContent'); if(el) el.innerHTML='';
+    ({
+      home:()=>renderHome(el), allgames:()=>renderAllGames(el),
+      categories:()=>renderCategories(el), gamedetail:()=>renderGameDetail(el,param),
+      about:()=>renderAbout(el), contact:()=>renderContact(el),
+      profile:()=>renderProfile(el), admin:()=>renderAdmin(el),
+    }[page]||(() =>renderHome(el)))();
   });
 });

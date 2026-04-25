@@ -192,8 +192,6 @@ function initFirebase() {
       _fbReady = true;
       console.log('[NexusGames] Firebase connected ✅');
       showToast('success','fa-solid fa-database','Firebase connected! Sab devices sync honge.');
-      // Update login page status if visible
-      try { if (window._onFirebaseReady) window._onFirebaseReady(); } catch(e) {}
 
       var data = snapshot.val();
       if (data) {
@@ -210,6 +208,16 @@ function initFirebase() {
               profile:function(){renderProfile(el)},admin:function(){renderAdmin(el)},
             }[S.page]||function(){})();
           } catch(e){}
+        } else if (!S.user) {
+          // Firebase loaded — retry session for phone/new device
+          try {
+            if (sessionLoad()) {
+              var lp=ge('loginPage'), aw=ge('appWrapper');
+              if(lp) lp.style.display='none';
+              if(aw) aw.style.display='block';
+              initApp(true);
+            }
+          } catch(e2){}
         }
       } else {
         // No remote data yet — push current local data to Firebase
@@ -291,28 +299,21 @@ function phpCall(action, data) {
 function _applyData(saved) {
   try {
     if (saved.games && Array.isArray(saved.games)) {
-      // Merge: Firebase games + any locally added games not yet saved to Firebase
+      // Merge: keep any locally added games not yet in Firebase
       var fbIds = saved.games.map(function(g){ return g.id; });
       var localOnly = DB.games.filter(function(g){ return !fbIds.includes(g.id); });
-      // Restore htmlFileContent from localStorage for each game
-      var merged = saved.games.map(function(g){
-        var local = localStorage.getItem('nexusgames_html_' + g.id);
-        if (local && !g.htmlFileContent) g.htmlFileContent = local;
-        return g;
-      });
-      // Add locally added games that Firebase doesn't have yet
-      DB.games = merged.concat(localOnly);
+      DB.games = saved.games.concat(localOnly);
     }
     if (saved.sliderItems && Array.isArray(saved.sliderItems)) DB.sliderItems = saved.sliderItems;
     if (saved.lockedUsers && Array.isArray(saved.lockedUsers)) DB.lockedUsers = saved.lockedUsers;
-    if (saved.users       && Array.isArray(saved.users) && saved.users.length > 0) {
-      // Firebase is truth — use ALL users from Firebase (includes newly registered players)
-      DB.users = saved.users.map(function(u){ return Object.assign({}, u); });
-      // Also update DB_SEED so local fallback stays in sync
+    if (saved.users       && Array.isArray(saved.users)) {
+      var defaultIds = DB_SEED.users.map(function(u){return u.id;});
+      var extraUsers = saved.users.filter(function(u){return !defaultIds.includes(u.id);});
       DB_SEED.users.forEach(function(def){
         var updated = saved.users.find(function(u){return u.id===def.id;});
         if (updated) Object.assign(def, updated);
       });
+      DB.users = DB_SEED.users.concat(extraUsers);
     }
     DB.games.forEach(function(g) {
       if (!g.htmlFileContent) {
@@ -353,13 +354,8 @@ function _buildFullSnapshot() {
   var dbCopy = JSON.parse(JSON.stringify(DB));
   dbCopy.games.forEach(function(g) {
     if (g.htmlFileContent) {
-      // Save locally for fast access and offline play
       try { localStorage.setItem('nexusgames_html_' + g.id, g.htmlFileContent); } catch(e) {}
-      // REMOVE from Firebase snapshot — HTML files are too large (causes "Save failed")
-      // Each device loads from localStorage; admin device has it after first upload
       delete g.htmlFileContent;
-      // Store filename so other devices know a file exists
-      // g.htmlFileName is already preserved
     }
   });
 
@@ -493,22 +489,22 @@ const PAGE_KEY    = 'nexusgames_page_v1';
 function sessionSave() {
   if (!S.user) return;
   try {
-    // Save FULL user object so restore works without Firebase being ready
-    localStorage.setItem(SESSION_KEY, JSON.stringify(S.user));
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      id: S.user.id, username: S.user.username, role: S.user.role
+    }));
   } catch(e) {}
 }
 
 function sessionLoad() {
+  // Restore page position from URL hash first
   try {
     const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return false;
     const sess = JSON.parse(raw);
-    if (!sess || !sess.id || !sess.username || !sess.role) {
-      localStorage.removeItem(SESSION_KEY); return false;
-    }
-    // Restore user from saved session directly — no DB lookup needed
-    // This works even before Firebase loads
-    S.user = sess;
+    // Find user in DB (DB is already loaded by dbLoad above)
+    const found = DB.users.find(u => u.id === sess.id && u.username === sess.username && u.role === sess.role);
+    if (!found) { localStorage.removeItem(SESSION_KEY); return false; }
+    S.user = found;
     return true;
   } catch(e) { return false; }
 }
@@ -521,15 +517,9 @@ function sessionClear() {
 function pageSave(page, param) {
   try {
     localStorage.setItem(PAGE_KEY, JSON.stringify({page, param: param||null}));
-    // Use pushState so browser back/forward button works properly
+    // Also update URL hash so browser back/forward works
     const hash = param ? `#${page}/${param}` : `#${page}`;
-    // Only pushState if navigating to a different page (not same page refresh)
-    const currentHash = window.location.hash;
-    if (currentHash !== hash) {
-      history.pushState({page, param: param||null}, '', hash);
-    } else {
-      history.replaceState({page, param: param||null}, '', hash);
-    }
+    history.replaceState(null, '', hash);
   } catch(e) {}
 }
 
@@ -554,15 +544,7 @@ function doLogin() {
   hide('login-error');
   if (!u||!p) { showAuthErr('login-error','login-err-msg','Please fill in all fields.'); return; }
   const found = DB.users.find(x => x.username===u && x.password===p && x.role===role);
-  if (!found) {
-    // If Firebase is connected but not yet fully loaded, give hint
-    if (USE_FIREBASE && !_fbReady) {
-      showAuthErr('login-error','login-err-msg','Connecting to server... please wait a moment and try again.');
-    } else {
-      showAuthErr('login-error','login-err-msg','Invalid credentials. Check username and password.');
-    }
-    return;
-  }
+  if (!found) { showAuthErr('login-error','login-err-msg','Invalid credentials. Check username and password.'); return; }
   // Check if account is locked
   if (DB.lockedUsers && DB.lockedUsers.includes(found.id)) {
     showAuthErr('login-error','login-err-msg','This account has been locked by admin. Please contact support.');
@@ -612,10 +594,8 @@ function showAuthErr(eid,mid,msg) {
 
 function logout() {
   S.user = null;
-  S.page = 'home';
-  S.gameId = null;
   sessionClear();
-  history.replaceState(null, '', window.location.pathname);
+  history.replaceState(null, '', window.location.pathname); // remove hash
   ge('appWrapper').style.display = 'none';
   ge('loginPage').style.display  = 'flex';
   showToast('info','fa-solid fa-right-from-bracket','Signed out successfully.');
@@ -633,30 +613,23 @@ function initApp(restorePage) {
   renderSidebar();
   if (restorePage) {
     const saved = pageLoad();
-    const pg    = saved.page || 'home';
-    const pm    = saved.param ? (parseInt(saved.param)||saved.param) : null;
-    // Set initial history entry so back button works from first page
-    history.replaceState({page: pg, param: pm||null}, '', pm ? `#${pg}/${pm}` : `#${pg}`);
-    navigateTo(pg, pm);
+    navigateTo(saved.page || 'home', saved.param ? parseInt(saved.param)||saved.param : null);
   } else {
-    history.replaceState({page:'home', param:null}, '', '#home');
     navigateTo('home');
   }
 }
 
 /* ─── NAVIGATION ────────────────────────────── */
 function navigateTo(page, param) {
-  // Ensure game IDs are always integers
-  const paramFinal = (page === 'gamedetail' && param) ? (parseInt(param)||param) : (param||null);
-  S.page=page; S.gameId=paramFinal;
-  pageSave(page, paramFinal);
+  S.page=page; S.gameId=param||null;
+  pageSave(page, param); // ← save current page to localStorage + URL hash
   if (S.slideTimer) { clearInterval(S.slideTimer); S.slideTimer=null; }
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page===page));
   closeSidebar();
   const el=ge('pageContent'); el.innerHTML='';
   ({
     home:()=>renderHome(el), allgames:()=>renderAllGames(el),
-    categories:()=>renderCategories(el), gamedetail:()=>renderGameDetail(el,paramFinal),
+    categories:()=>renderCategories(el), gamedetail:()=>renderGameDetail(el,param),
     about:()=>renderAbout(el), contact:()=>renderContact(el),
     profile:()=>renderProfile(el), admin:()=>renderAdmin(el),
   }[page]||(() =>renderHome(el)))();
@@ -894,29 +867,21 @@ function renderCategories(el) {
 
 /* ─── GAME DETAIL ───────────────────────────── */
 function renderGameDetail(el, gid) {
-  // Handle both string and number IDs robustly
-  const gidNum = parseInt(gid);
-  const g = DB.games.find(x => x.id === gidNum || String(x.id) === String(gid));
+  const gidN = parseInt(gid);
+  const g = DB.games.find(x => x.id === gidN || x.id == gid);
   if (!g) {
-    // Show loading and retry after Firebase loads
-    el.innerHTML = `<div style="text-align:center;padding:60px 20px;color:var(--t3)">
-      <i class="fa-solid fa-circle-notch fa-spin" style="font-size:40px;color:#0ea5e9;margin-bottom:16px;display:block"></i>
-      <p style="font-size:14px">Loading game...</p>
-    </div>`;
-    var attempts = 0;
-    var retryInterval = setInterval(function(){
-      attempts++;
-      var g2 = DB.games.find(x => x.id === gidNum || String(x.id) === String(gid));
-      if (g2) {
-        clearInterval(retryInterval);
-        el.innerHTML = '';
-        renderGameDetail(el, gid);
-      } else if (attempts >= 10) {
-        clearInterval(retryInterval);
-        el.innerHTML = `<div class="alert alert-info">${duoIcon('info','sm')} Game not found. Please go back and try again.</div>`;
-      }
-    }, 500);
-    return;
+    if (USE_FIREBASE && !_fbReady) {
+      el.innerHTML = `<div style="text-align:center;padding:60px 20px;color:#94a3b8">
+        <i class="fa-solid fa-circle-notch fa-spin" style="font-size:36px;color:#0ea5e9;display:block;margin-bottom:14px"></i>
+        Loading game...</div>`;
+      setTimeout(function(){
+        var g2 = DB.games.find(x => x.id === gidN || x.id == gid);
+        if (g2) { el.innerHTML=''; renderGameDetail(el, gid); }
+        else { el.innerHTML=`<div class="alert alert-info">${duoIcon('info','sm')} Game not found.</div>`; }
+      }, 4000);
+      return;
+    }
+    el.innerHTML=`<div class="alert alert-info">${duoIcon('info','sm')} Game not found.</div>`; return;
   }
   const c=ci(g.cat);
   const stars=n=>[1,2,3,4,5].map(i=>`<i class="fa-${i<=Math.round(n)?'solid':'regular'} fa-star" style="font-size:13px;color:#f59e0b"></i>`).join('');
@@ -2267,20 +2232,15 @@ function saveGame(gid) {
     const g=DB.games.find(x=>x.id===gid);
     if(g) Object.assign(g,data);
     showToast('success','fa-solid fa-check','Game updated successfully.');
-    dbSave();
-    closeModal();
-    renderAdmin(ge('pageContent'));
   } else {
     data.id=Math.max(...DB.games.map(x=>x.id),0)+1;
     data.plays=0; data.comments=[];
     DB.games.push(data);
-    showToast('success','fa-solid fa-check','Game added! Opening game page...');
-    dbSave();
-    closeModal();
-    // Navigate to the new game immediately — don't wait for Firebase
-    const newId = data.id;
-    setTimeout(function(){ navigateTo('gamedetail', newId); }, 300);
+    showToast('success','fa-solid fa-check','Game added successfully.');
   }
+  dbSave();
+  closeModal();
+  renderAdmin(ge('pageContent'));
   setTimeout(updateStorageStatus, 100);
 }
 
@@ -2334,10 +2294,10 @@ document.addEventListener('DOMContentLoaded',()=>{
     setTimeout(function(){ dbLoad(); }, 200); // slight delay so page renders first
   }
 
-  // ── 1. AUTO-RESTORE SESSION ──
-  // Session ab full user object store karta hai — Firebase load hone ki zarurat nahi
+  // ── 1. AUTO-RESTORE SESSION (must run first, before anything else) ──
   try {
     if (sessionLoad()) {
+      // Valid session found — hide login, show app immediately (no flash)
       const lp = ge('loginPage');
       const aw = ge('appWrapper');
       if (lp) lp.style.display = 'none';
@@ -2346,28 +2306,11 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
   } catch(e) {
     console.warn('Session restore failed:', e);
+    // Stay on login page
   }
 
   // ── 2. Login page setup (only needed if not auto-logged-in) ──
   try { injectLoginIcons(); } catch(e) {}
-
-  // Firebase status indicator on login page
-  if (USE_FIREBASE) {
-    const loginCard = document.querySelector('.login-card');
-    if (loginCard) {
-      const fbStatus = document.createElement('div');
-      fbStatus.id = 'fbLoginStatus';
-      fbStatus.style.cssText = 'text-align:center;font-size:11px;color:#94a3b8;padding:6px 0 2px;letter-spacing:0.3px;display:flex;align-items:center;justify-content:center;gap:5px;';
-      fbStatus.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin" style="font-size:10px;color:#0ea5e9"></i> Connecting to server...';
-      loginCard.appendChild(fbStatus);
-      // Update when Firebase connects
-      const _origInitFb = window._fbReadyCallback;
-      window._onFirebaseReady = function() {
-        const el = document.getElementById('fbLoginStatus');
-        if (el) { el.innerHTML = '<i class="fa-solid fa-circle" style="font-size:8px;color:#34d399"></i> Server connected — all accounts synced'; }
-      };
-    }
-  }
 
   // Particles
   try {
@@ -2392,18 +2335,12 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
   });
 
-  // Enter key on login, register, forgot
+  // Enter key on login
   ['l-user','l-pass'].forEach(id=>{
     ge(id)?.addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); });
   });
-  ['r-name','r-user','r-pass','r-pass2'].forEach(id=>{
-    ge(id)?.addEventListener('keydown',e=>{ if(e.key==='Enter') doRegister(); });
-  });
-  ['f-user','f-pass','f-pass2'].forEach(id=>{
-    ge(id)?.addEventListener('keydown',e=>{ if(e.key==='Enter') doForgot(); });
-  });
 
-  // Browser back/forward button support (hashchange for hash nav)
+  // Browser back/forward button support
   window.addEventListener('hashchange', () => {
     if (!S.user) return;
     const hash = window.location.hash.replace('#','');
@@ -2423,34 +2360,5 @@ document.addEventListener('DOMContentLoaded',()=>{
         profile:()=>renderProfile(el), admin:()=>renderAdmin(el),
       }[page]||(() =>renderHome(el)))();
     }
-  });
-
-  // popstate: handles browser back/forward with pushState history
-  window.addEventListener('popstate', (event) => {
-    if (!S.user) return;
-    // Get state from history or fall back to hash
-    let page = 'home', param = null;
-    if (event.state && event.state.page) {
-      page  = event.state.page;
-      param = event.state.param || null;
-    } else {
-      const hash = window.location.hash.replace('#','');
-      if (hash) {
-        const parts = hash.split('/');
-        page  = parts[0] || 'home';
-        param = parts[1] ? (parseInt(parts[1])||parts[1]) : null;
-      }
-    }
-    S.page = page; S.gameId = param;
-    localStorage.setItem(PAGE_KEY, JSON.stringify({page, param: param||null}));
-    if (S.slideTimer) { clearInterval(S.slideTimer); S.slideTimer=null; }
-    document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
-    const el=ge('pageContent'); if(el) el.innerHTML='';
-    ({
-      home:()=>renderHome(el), allgames:()=>renderAllGames(el),
-      categories:()=>renderCategories(el), gamedetail:()=>renderGameDetail(el,param),
-      about:()=>renderAbout(el), contact:()=>renderContact(el),
-      profile:()=>renderProfile(el), admin:()=>renderAdmin(el),
-    }[page]||(() =>renderHome(el)))();
   });
 });
